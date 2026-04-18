@@ -12,6 +12,8 @@
 
 <br>
 
+**Deep dive:** [Cloudflare clearance (egress, TLS impersonation, cookies, FlareSolverr)](cloudflare-clearance.md).
+
 Grok2API is a **FastAPI**-based Grok gateway that exposes Grok Web capabilities through OpenAI-compatible APIs. Core features:
 - OpenAI-compatible endpoints: `/v1/models`, `/v1/chat/completions`, `/v1/responses`, `/v1/images/generations`, `/v1/images/edits`, `/v1/videos`, `/v1/videos/{video_id}`, `/v1/videos/{video_id}/content`
 - Anthropic-compatible endpoint: `/v1/messages`

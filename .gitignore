@@ -53,3 +53,15 @@ htmlcov/
 
 # Project specific
 .ace-tool/
+
+# Desktop GUI (npm / Tauri)
+desktop gui/node_modules/
+desktop gui/src-tauri/target/
+# `lib/` above ignores Python egg layout but also matched `desktop gui/app/lib/` — keep GUI helpers tracked.
+!desktop gui/app/lib/
+!desktop gui/app/lib/**
+
+# Fetched HTML (may contain private contributor data)
+examples/contributor.html
+examples/contributor-data.json
+contributor.html
