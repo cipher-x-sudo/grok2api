@@ -32,10 +32,17 @@ class ProxyDirectory:
         self._resource_nodes: list[EgressNode]          = []  # for media downloads
         self._bundles:        dict[str, ClearanceBundle] = {}
         self._lock            = asyncio.Lock()
+        # Single-flight guard: at most one FlareSolverr call per affinity key.
+        # Other coroutines wait on the Event until the active refresh completes.
+        self._refresh_events: dict[str, asyncio.Event]  = {}
         self._manual          = ManualClearanceProvider()
         self._flare           = FlareSolverrClearanceProvider()
         self._egress_mode:    EgressMode    = EgressMode.DIRECT
         self._clearance_mode: ClearanceMode = ClearanceMode.NONE
+        self._config_sig:     tuple | None  = None
+        # Pool cursor for PROXY_POOL mode: sticky routing with failure-driven rotate.
+        # Incremented on node failure; all callers see the same cursor under _lock.
+        self._pool_cursor:    int           = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -44,36 +51,73 @@ class ProxyDirectory:
     async def load(self) -> None:
         """Load proxy configuration from the current config snapshot."""
         cfg = get_config()
-        self._egress_mode    = EgressMode(cfg.get_str("proxy.egress.mode", "direct"))
-        self._clearance_mode = ClearanceMode.parse(cfg.get_str("proxy.clearance.mode", "none"))
+        egress_mode = EgressMode(cfg.get_str("proxy.egress.mode", "direct"))
+        clearance_mode = ClearanceMode.parse(cfg.get_str("proxy.clearance.mode", "none"))
+        base_url = cfg.get_str("proxy.egress.proxy_url", "")
+        res_url = cfg.get_str("proxy.egress.resource_proxy_url", "")
+        base_pool = tuple(cfg.get_list("proxy.egress.proxy_pool", []))
+        res_pool = tuple(cfg.get_list("proxy.egress.resource_proxy_pool", []))
+        config_sig = (
+            egress_mode.value,
+            clearance_mode.value,
+            base_url,
+            res_url,
+            base_pool,
+            res_pool,
+            cfg.get_str("proxy.clearance.flaresolverr_url", ""),
+            cfg.get_str("proxy.clearance.cf_cookies", ""),
+            cfg.get_str("proxy.clearance.user_agent", ""),
+            cfg.get_int("proxy.clearance.timeout_sec", 60),
+        )
 
         nodes: list[EgressNode]          = []
         resource_nodes: list[EgressNode] = []
 
-        if self._egress_mode == EgressMode.SINGLE_PROXY:
-            base_url = cfg.get_str("proxy.egress.proxy_url", "")
-            res_url  = cfg.get_str("proxy.egress.resource_proxy_url", "")
+        if egress_mode == EgressMode.SINGLE_PROXY:
             if base_url:
                 nodes.append(EgressNode(node_id="single", proxy_url=base_url))
             if res_url:
                 resource_nodes.append(EgressNode(node_id="res-single", proxy_url=res_url))
 
-        elif self._egress_mode == EgressMode.PROXY_POOL:
-            base_pool: list[str] = cfg.get_list("proxy.egress.proxy_pool", [])
-            res_pool:  list[str] = cfg.get_list("proxy.egress.resource_proxy_pool", [])
+        elif egress_mode == EgressMode.PROXY_POOL:
             for i, url in enumerate(base_pool):
                 nodes.append(EgressNode(node_id=f"pool-{i}", proxy_url=url))
             for i, url in enumerate(res_pool):
                 resource_nodes.append(EgressNode(node_id=f"res-pool-{i}", proxy_url=url))
 
+        valid_affinities = {
+            n.proxy_url or "direct"
+            for n in [*nodes, *resource_nodes]
+        }
+        if not valid_affinities:
+            valid_affinities = {"direct"}
+
         async with self._lock:
+            if self._config_sig == config_sig:
+                return
+            from .models import ClearanceBundleState
+
+            self._egress_mode    = egress_mode
+            self._clearance_mode = clearance_mode
             self._nodes          = nodes
             self._resource_nodes = resource_nodes
+            self._pool_cursor    = 0
+            self._bundles = {
+                key: bundle.model_copy(update={"state": ClearanceBundleState.INVALID})
+                for key, bundle in self._bundles.items()
+                if key in valid_affinities
+            }
+            self._refresh_events = {
+                key: event
+                for key, event in self._refresh_events.items()
+                if key in valid_affinities
+            }
+            self._config_sig = config_sig
 
         logger.info(
             "proxy directory loaded: egress_mode={} clearance_mode={} node_count={} resource_node_count={}",
-            self._egress_mode,
-            self._clearance_mode,
+            egress_mode,
+            clearance_mode,
             len(nodes),
             len(resource_nodes),
         )
@@ -124,6 +168,26 @@ class ProxyDirectory:
                         update={"state": ClearanceBundleState.INVALID}
                     )
 
+        # In PROXY_POOL mode, rotate to the next node on any failure so the
+        # next acquire() prefers a different egress rather than hammering the
+        # same broken node.
+        if (
+            self._egress_mode == EgressMode.PROXY_POOL
+            and lease.proxy_url
+            and result.kind in (
+                ProxyFeedbackKind.CHALLENGE,
+                ProxyFeedbackKind.UNAUTHORIZED,
+                ProxyFeedbackKind.FORBIDDEN,
+                ProxyFeedbackKind.TRANSPORT_ERROR,
+            )
+        ):
+            async with self._lock:
+                self._pool_cursor += 1
+                logger.debug(
+                    "proxy pool cursor advanced: proxy={} kind={} cursor={}",
+                    lease.proxy_url, result.kind, self._pool_cursor,
+                )
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -139,8 +203,9 @@ class ProxyDirectory:
                 return None
             if self._egress_mode == EgressMode.SINGLE_PROXY:
                 return nodes[0].proxy_url
-            # PROXY_POOL: pick least-inflight node.
-            return min(nodes, key=lambda n: n.inflight).proxy_url
+            # PROXY_POOL: sticky routing — use current cursor, rotate on failure.
+            idx = self._pool_cursor % len(nodes)
+            return nodes[idx].proxy_url
 
     async def _get_or_build_bundle(
         self,
@@ -151,24 +216,118 @@ class ProxyDirectory:
         if self._clearance_mode == ClearanceMode.NONE:
             return None
 
-        async with self._lock:
-            existing = self._bundles.get(affinity_key)
-            if existing and existing.state.value == 0:   # VALID
-                return existing
+        # Single-flight: only one coroutine fetches clearance per affinity key.
+        # Concurrent callers wait on the Event and retry once it fires.
+        while True:
+            async with self._lock:
+                bundle = self._bundles.get(affinity_key)
+                if bundle and bundle.state.value == 0:   # VALID
+                    return bundle
+                event = self._refresh_events.get(affinity_key)
+                if event is None:
+                    # This coroutine wins the right to refresh.
+                    event = asyncio.Event()
+                    self._refresh_events[affinity_key] = event
+                    break
+            # Another coroutine is already refreshing — wait for it, then retry.
+            await event.wait()
 
-        if self._clearance_mode == ClearanceMode.MANUAL:
-            bundle = self._manual.build_bundle(affinity_key=affinity_key)
-        else:
-            bundle = await self._flare.refresh_bundle(
-                affinity_key = affinity_key,
+        try:
+            if self._clearance_mode == ClearanceMode.MANUAL:
+                bundle = self._manual.build_bundle(affinity_key=affinity_key)
+            else:
+                bundle = await self._flare.refresh_bundle(
+                    affinity_key = affinity_key,
+                    proxy_url    = proxy_url,
+                )
+            if bundle:
+                async with self._lock:
+                    self._bundles[affinity_key] = bundle
+            return bundle
+        finally:
+            async with self._lock:
+                self._refresh_events.pop(affinity_key, None)
+            event.set()  # Wake all waiters so they retry with the new bundle.
+
+    # ------------------------------------------------------------------
+    # Clearance lifecycle helpers (used by ProxyClearanceScheduler)
+    # ------------------------------------------------------------------
+
+    async def invalidate_clearance(self) -> None:
+        """Mark all cached clearance bundles as invalid.
+
+        The next ``acquire()`` call for each affinity key will trigger a fresh
+        FlareSolverr fetch (serialised by the single-flight guard).
+        """
+        from .models import ClearanceBundleState
+        async with self._lock:
+            self._bundles = {
+                k: b.model_copy(update={"state": ClearanceBundleState.INVALID})
+                for k, b in self._bundles.items()
+            }
+        logger.debug("clearance bundles invalidated: count={}", len(self._bundles))
+
+    async def warm_up(self) -> None:
+        """Pre-fetch clearance bundles for all configured affinity keys.
+
+        Called once at startup so the first real request does not have to wait
+        for FlareSolverr.  Does NOT invalidate existing bundles first.
+        """
+        if self._clearance_mode == ClearanceMode.NONE:
+            return
+        async with self._lock:
+            nodes = list(self._nodes)
+        affinity_keys = (
+            [(n.proxy_url or "direct", n.proxy_url or "") for n in nodes]
+            if nodes
+            else [("direct", "")]
+        )
+        for affinity, proxy_url in affinity_keys:
+            await self._get_or_build_bundle(
+                affinity_key = affinity,
                 proxy_url    = proxy_url,
             )
 
-        if bundle:
-            async with self._lock:
-                self._bundles[affinity_key] = bundle
+    async def refresh_clearance_safe(self) -> None:
+        """Scheduled clearance refresh: build new bundles then swap atomically.
 
-        return bundle
+        Unlike ``invalidate_clearance() + warm_up()``, this never discards a
+        working bundle before a replacement is ready.  If FlareSolverr is
+        temporarily unavailable the old bundle remains valid and continues to
+        serve requests.
+        """
+        if self._clearance_mode == ClearanceMode.NONE:
+            return
+        async with self._lock:
+            nodes    = list(self._nodes)
+            existing = set(self._bundles.keys())
+
+        affinity_items = (
+            [(n.proxy_url or "direct", n.proxy_url or "") for n in nodes]
+            if nodes
+            else [("direct", "")]
+        )
+        # Also refresh bundles for keys that no longer have a matching node
+        # (e.g. pool was reconfigured) so stale entries get cleaned up.
+        all_keys = {a for a, _ in affinity_items} | existing
+
+        for affinity in all_keys:
+            proxy_url = "" if affinity == "direct" else affinity
+            if self._clearance_mode == ClearanceMode.MANUAL:
+                new_bundle = self._manual.build_bundle(affinity_key=affinity)
+            else:
+                new_bundle = await self._flare.refresh_bundle(
+                    affinity_key = affinity,
+                    proxy_url    = proxy_url,
+                )
+            if new_bundle:
+                async with self._lock:
+                    self._bundles[affinity] = new_bundle
+                logger.debug("clearance bundle refreshed: affinity={}", affinity)
+            else:
+                logger.warning(
+                    "clearance refresh failed, keeping old bundle: affinity={}", affinity
+                )
 
     # ------------------------------------------------------------------
     # Properties
@@ -205,11 +364,11 @@ _directory: ProxyDirectory | None = None
 
 
 async def get_proxy_directory() -> ProxyDirectory:
-    """Return the module-level ProxyDirectory, loading config on first call."""
+    """Return the module-level ProxyDirectory, reloading config if it changed."""
     global _directory
     if _directory is None:
         _directory = ProxyDirectory()
-        await _directory.load()
+    await _directory.load()
     return _directory
 
 
