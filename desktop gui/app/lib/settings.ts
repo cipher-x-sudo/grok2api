@@ -12,14 +12,14 @@ export function loadSettings(): {
   adminKey: string;
 } {
   if (typeof window === "undefined") {
-    return { baseUrl: "http://localhost:8000", apiKey: "", adminKey: "" };
+    return { baseUrl: "", apiKey: "", adminKey: "" };
   }
   return {
     baseUrl: normalizeBaseUrl(
-      localStorage.getItem(BASE_KEY) || "http://localhost:8000",
+      localStorage.getItem(BASE_KEY) || ""
     ),
-    apiKey: localStorage.getItem(API_KEY) || "",
-    adminKey: localStorage.getItem(ADMIN_KEY) || "",
+    apiKey: localStorage.getItem(API_KEY) || import.meta.env.VITE_API_KEY || "sk-local-docker",
+    adminKey: localStorage.getItem(ADMIN_KEY) || import.meta.env.VITE_ADMIN_KEY || "admin-local-docker",
   };
 }
 

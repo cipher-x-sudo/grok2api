@@ -30,6 +30,20 @@ services:
       - ./logs:/app/logs
     restart: unless-stopped
 
+  gui:
+    container_name: grok2gui
+    build:
+      context: "./desktop gui"
+      dockerfile: Dockerfile
+      args:
+        VITE_API_KEY: ${API_KEY:-}
+        VITE_ADMIN_KEY: ${ADMIN_KEY:-}
+    ports:
+      - "8081:80"
+    depends_on:
+      - grok2api
+    restart: unless-stopped
+
   # 如果出口 IP 不干净，可取消以下注释使用 Warp 作为落地代理
   # 启用后将 proxy.base_proxy_url 设为 socks5://warp:1080
   # warp:
