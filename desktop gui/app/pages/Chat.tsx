@@ -254,7 +254,7 @@ export function Chat() {
         );
       }
       
-      const finalMsg = { role: "assistant", content: acc || "(empty response)", thinking: think || undefined };
+      const finalMsg = { role: "assistant" as const, content: acc || "(empty response)", thinking: think || undefined };
       setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, ...finalMsg } : m)));
       
       if (currentSessionId) {
