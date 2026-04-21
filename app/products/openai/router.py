@@ -616,7 +616,7 @@ async def serve_video(id: str = Query(..., description="Video file ID")):
     """Serve a locally cached video by file ID."""
     import re
 
-    if not re.fullmatch(r"[0-9a-f\-]{16,36}", id):
+    if not re.fullmatch(r"[0-9a-zA-Z\-_]{16,64}", id):
         raise ValidationError("Invalid file ID", param="id")
 
     path = video_files_dir() / f"{id}.mp4"
@@ -631,7 +631,7 @@ async def serve_image(id: str = Query(..., description="Image file ID")):
     """Serve a locally cached image by file ID."""
     import re
 
-    if not re.fullmatch(r"[0-9a-f\-]{16,36}", id):
+    if not re.fullmatch(r"[0-9a-zA-Z\-_]{16,64}", id):
         raise ValidationError("Invalid file ID", param="id")
 
     img_dir = image_files_dir()

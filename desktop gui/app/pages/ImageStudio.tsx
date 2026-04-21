@@ -41,7 +41,13 @@ const MODELS = [
   { value: "grok-imagine-edit", label: "Edit" },
 ];
 
-const RESOLUTIONS = ["1024x1024", "1280x720", "720x1280"];
+const RESOLUTIONS = [
+  { value: "1024x1024", label: "1:1 Square (1024x1024)" },
+  { value: "1280x720", label: "16:9 Landscape (1280x720)" },
+  { value: "720x1280", label: "9:16 Portrait (720x1280)" },
+  { value: "1792x1024", label: "3:2 Landscape (1792x1024)" },
+  { value: "1024x1792", label: "2:3 Portrait (1024x1792)" },
+];
 
 export function ImageStudio() {
   const [promptText, setPromptText] = useState("");
@@ -324,8 +330,8 @@ export function ImageStudio() {
                   className="w-full gradio-input px-3 py-2 text-sm cursor-pointer"
                 >
                   {RESOLUTIONS.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
+                    <option key={r.value} value={r.value}>
+                      {r.label}
                     </option>
                   ))}
                 </select>

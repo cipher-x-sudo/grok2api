@@ -30,12 +30,20 @@ interface VideoJob {
 const DURATIONS = [6, 10, 12, 16, 20];
 const RESOLUTIONS = ["480p", "720p"] as const;
 const STYLES = ["fun", "normal", "spicy"] as const;
+const SIZES = [
+  { value: "1024x1024", label: "1:1 Square" },
+  { value: "1280x720", label: "16:9 Landscape" },
+  { value: "720x1280", label: "9:16 Portrait" },
+  { value: "1792x1024", label: "3:2 Landscape" },
+  { value: "1024x1792", label: "2:3 Portrait" },
+];
 
 export function VideoStudio() {
   const [promptText, setPromptText] = useState("");
   const [baseImage, setBaseImage] = useState<string | null>(null);
   const [duration, setDuration] = useState(10);
   const [resolution, setResolution] = useState<(typeof RESOLUTIONS)[number]>("720p");
+  const [size, setSize] = useState("720x1280");
   const [style, setStyle] = useState<(typeof STYLES)[number]>("normal");
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [currentVideo, setCurrentVideo] = useState<string | null>(null);
@@ -97,7 +105,7 @@ export function VideoStudio() {
           const created = await createVideoJob({
             prompt: line,
             seconds: duration,
-            size: "720x1280",
+            size: size,
             resolutionName: resolution,
             preset: style,
             baseImageDataUrl: baseImage,
@@ -223,6 +231,20 @@ export function VideoStudio() {
 
           <div className="grid grid-cols-2 gap-3">
             <div>
+              <label className="block text-xs font-medium text-muted-foreground mb-1.5">Size / Orientation</label>
+              <select
+                value={size}
+                onChange={(e) => setSize(e.target.value)}
+                className="w-full gradio-input px-3 py-2 text-sm cursor-pointer"
+              >
+                {SIZES.map((s) => (
+                  <option key={s.value} value={s.value}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="block text-xs font-medium text-muted-foreground mb-1.5">Resolution</label>
               <select
                 value={resolution}
@@ -236,20 +258,21 @@ export function VideoStudio() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-muted-foreground mb-1.5">Style</label>
-              <select
-                value={style}
-                onChange={(e) => setStyle(e.target.value as (typeof STYLES)[number])}
-                className="w-full gradio-input px-3 py-2 text-sm cursor-pointer"
-              >
-                {STYLES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-muted-foreground mb-1.5">Style</label>
+            <select
+              value={style}
+              onChange={(e) => setStyle(e.target.value as (typeof STYLES)[number])}
+              className="w-full gradio-input px-3 py-2 text-sm cursor-pointer"
+            >
+              {STYLES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
           </div>
 
           <button
