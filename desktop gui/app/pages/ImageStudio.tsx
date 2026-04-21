@@ -57,8 +57,14 @@ export function ImageStudio() {
   const [imagesPerPrompt, setImagesPerPrompt] = useState(2);
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [allImages, setAllImages] = useState<GeneratedImage[]>([]);
+  const [autoDownload, setAutoDownload] = useState(true);
+  const autoDownloadRef = useRef(autoDownload);
   const processingRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    autoDownloadRef.current = autoDownload;
+  }, [autoDownload]);
 
   const promptLines = promptText
     .split("\n")
@@ -139,6 +145,17 @@ export function ImageStudio() {
 
           const tagged = results.map((r) => ({ ...r, prompt: pending.prompt }));
           if (cancelled) break;
+
+          // Auto-download
+          if (autoDownloadRef.current) {
+            tagged.forEach((img) => {
+              const a = document.createElement("a");
+              a.href = img.url;
+              a.download = `grok-image-${img.id}.png`;
+              a.click();
+            });
+          }
+
           setQueue((prev) =>
             prev.map((q) =>
               q.id === pending.id ? { ...q, status: "done", results: tagged } : q,
@@ -352,6 +369,19 @@ export function ImageStudio() {
                   ))}
                 </select>
               </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-muted-foreground cursor-pointer" htmlFor="image-auto-download">
+                Auto-download
+              </label>
+              <input
+                id="image-auto-download"
+                type="checkbox"
+                checked={autoDownload}
+                onChange={(e) => setAutoDownload(e.target.checked)}
+                className="w-4 h-4 accent-primary cursor-pointer"
+              />
             </div>
 
             {/* Add to Queue */}

@@ -47,6 +47,12 @@ export function VideoStudio() {
   const [style, setStyle] = useState<(typeof STYLES)[number]>("normal");
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [currentVideo, setCurrentVideo] = useState<string | null>(null);
+  const [autoDownload, setAutoDownload] = useState(true);
+  const autoDownloadRef = useRef(autoDownload);
+
+  useEffect(() => {
+    autoDownloadRef.current = autoDownload;
+  }, [autoDownload]);
 
   const promptLines = promptText
     .split("\n")
@@ -117,6 +123,15 @@ export function VideoStudio() {
           await waitForVideoCompletion(videoId);
           const blob = await fetchVideoMp4Blob(videoId);
           const url = URL.createObjectURL(blob);
+
+          // Auto-download
+          if (autoDownloadRef.current) {
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `grok-video-${videoId}.mp4`;
+            a.click();
+          }
+
           setJobs((prev) =>
             prev.map((j) =>
               j.clientKey === clientKey
@@ -273,6 +288,19 @@ export function VideoStudio() {
                 </option>
               ))}
             </select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-medium text-muted-foreground cursor-pointer" htmlFor="video-auto-download">
+              Auto-download
+            </label>
+            <input
+              id="video-auto-download"
+              type="checkbox"
+              checked={autoDownload}
+              onChange={(e) => setAutoDownload(e.target.checked)}
+              className="w-4 h-4 accent-primary cursor-pointer"
+            />
           </div>
 
           <button
