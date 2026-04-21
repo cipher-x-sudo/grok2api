@@ -1,7 +1,12 @@
 services:
   grok2api:
     container_name: grok2api
-    image: ghcr.io/chenyme/grok2api:latest
+    # Build from this repo so local code (e.g. router changes) runs in Docker.
+    # Omit `build` and set `image: ghcr.io/chenyme/grok2api:latest` to use the registry image only.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: grok2api:local
     ports:
       - "${HOST_PORT:-8000}:${SERVER_PORT:-8000}"
     environment:

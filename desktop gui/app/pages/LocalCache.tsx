@@ -33,6 +33,7 @@ interface CachedAsset {
 
 type FileTypeFilter = "all" | "images" | "videos";
 
+/** Basename without the last extension (e.g. `a.b.mp4` → `a.b`). Matches server `/v1/files/*?id=` stem rules. */
 function fileStem(name: string): string {
   const i = name.lastIndexOf(".");
   return i > 0 ? name.slice(0, i) : name;

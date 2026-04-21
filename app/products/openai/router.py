@@ -3,7 +3,11 @@
 import asyncio
 import base64
 import binascii
+import json
 import mimetypes
+import os
+import time
+from pathlib import Path
 from typing import Annotated, AsyncGenerator, AsyncIterable, Literal
 
 import orjson
@@ -14,6 +18,7 @@ from app.control.account.state_machine import is_manageable
 from app.platform.auth.middleware import verify_api_key
 from app.platform.errors import AppError, ValidationError
 from app.platform.logging.logger import logger
+from app.platform.paths import data_dir, log_dir
 from app.platform.storage import image_files_dir, video_files_dir
 from app.control.model import registry as model_registry
 from app.control.model.spec import ModelSpec
@@ -34,6 +39,180 @@ _TAG_RESPONSES = "OpenAI - Responses"
 _TAG_IMAGES = "OpenAI - Images"
 _TAG_VIDEOS = "OpenAI - Videos"
 _TAG_FILES = "OpenAI - Files"
+
+# Local cache filenames are ``{id}.<ext>`` where ``id`` is a single path segment (no
+# slashes). IDs may include dots, Unicode, or symbols from upstream-derived stems.
+_LOCAL_MEDIA_ID_MAX_LEN = 200
+_BAD_LOCAL_MEDIA_ID_CHARS = frozenset({"\x00", "/", "\\"})
+_LOCAL_VIDEO_SERVE_EXTS = (".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv")
+
+# region agent log
+def _agent_debug_log_paths() -> tuple[Path, ...]:
+    """Write under ``DATA_DIR`` and ``LOG_DIR`` so Docker binds ``./data`` and ``./logs`` both get a copy."""
+    out: list[Path] = []
+    for getter in (data_dir, log_dir):
+        try:
+            out.append(getter() / "debug-49553c.log")
+        except OSError:
+            pass
+    p = Path(__file__).resolve()
+    for i in (3, 4, 2):
+        try:
+            out.append(p.parents[i] / "debug-49553c.log")
+        except IndexError:
+            pass
+    out.append(Path.cwd() / "debug-49553c.log")
+    return tuple(dict.fromkeys(out))
+
+
+def _agent_dbg(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+    *,
+    run_id: str = "pre",
+) -> None:
+    line = (
+        json.dumps(
+            {
+                "sessionId": "49553c",
+                "runId": run_id,
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(time.time() * 1000),
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+    logger.info("agent_dbg_ndjson {}", line.strip())
+    for log_path in _agent_debug_log_paths():
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError:
+            continue
+
+
+# endregion
+
+
+def _path_is_under_resolved_base(base: Path, resolved: Path) -> bool:
+    """Windows-safe containment: ``is_relative_to`` can fail when ``resolve()`` mixes
+    ``\\\\?\\`` long paths with ordinary drive paths.
+    """
+    try:
+        if resolved.is_relative_to(base):
+            return True
+    except ValueError:
+        pass
+    try:
+        b_abs = os.path.normpath(os.path.abspath(str(base)))
+        r_abs = os.path.normpath(os.path.abspath(str(resolved)))
+        common = os.path.commonpath([b_abs, r_abs])
+    except ValueError:
+        return False
+    if os.name == "nt":
+        return os.path.normcase(common) == os.path.normcase(b_abs)
+    return common == b_abs
+
+
+def _parse_local_media_file_id(raw: str) -> str:
+    v = (raw or "").strip()
+    if not v or len(v) > _LOCAL_MEDIA_ID_MAX_LEN:
+        raise ValidationError("Invalid file ID", param="id")
+    if v in {".", ".."} or v.startswith(".."):
+        raise ValidationError("Invalid file ID", param="id")
+    if v.startswith(".") or _BAD_LOCAL_MEDIA_ID_CHARS & set(v):
+        raise ValidationError("Invalid file ID", param="id")
+    return v
+
+
+def _safe_file_in_media_dir(base: Path, filename: str) -> Path:
+    """Resolve ``base / filename`` and ensure the result stays under ``base``."""
+    if not filename:
+        raise ValidationError(
+            "Invalid media path",
+            param="id",
+            code="invalid_media_path",
+        )
+    fp = Path(filename)
+    if fp.name != filename or ".." in fp.parts:
+        raise ValidationError(
+            "Invalid media path",
+            param="id",
+            code="invalid_media_path",
+        )
+    try:
+        b = base.resolve()
+    except OSError as exc:
+        logger.warning(
+            "media base resolve failed: base={!r} error={}",
+            str(base),
+            exc,
+        )
+        raise ValidationError(
+            "Failed to resolve media directory",
+            param="id",
+            code="media_path_error",
+        ) from exc
+
+    candidate = b / filename
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError as exc:
+        logger.warning(
+            "media candidate resolve failed: base={!r} filename={!r} error={}",
+            str(b),
+            filename,
+            exc,
+        )
+        raise ValidationError(
+            "Failed to resolve media file path",
+            param="id",
+            code="media_path_error",
+        ) from exc
+
+    ok = _path_is_under_resolved_base(b, resolved)
+
+    if not ok:
+        # region agent log
+        _agent_dbg(
+            "H1",
+            "router._safe_file_in_media_dir:not_under_base",
+            "is_relative_to false",
+            {
+                "base_str": str(b),
+                "resolved_str": str(resolved),
+                "filename": filename,
+            },
+        )
+        # endregion
+        logger.warning(
+            "media path escapes base: base={!r} candidate={!r}",
+            str(b),
+            str(resolved),
+        )
+        raise ValidationError(
+            "Invalid media path",
+            param="id",
+            code="invalid_media_path",
+        )
+
+    # region agent log
+    _agent_dbg(
+        "H1",
+        "router._safe_file_in_media_dir:ok",
+        "path accepted",
+        {"base_str": str(b), "resolved_str": str(resolved), "filename": filename},
+    )
+    # endregion
+
+    return resolved
 
 
 async def _available_pools(request: Request) -> frozenset[str]:
@@ -607,41 +786,89 @@ async def image_edits(
 
 
 # ---------------------------------------------------------------------------
-# /v1/files/image — serve locally saved images
+# /v1/files/image and /v1/files/video — serve locally cached media
 # ---------------------------------------------------------------------------
 
 
 @router.get("/files/video", tags=[_TAG_FILES])
-async def serve_video(id: str = Query(..., description="Video file ID")):
-    """Serve a locally cached video by file ID."""
-    import re
+async def serve_video(
+    file_id: Annotated[str, Query(..., alias="id", description="Video file ID")],
+):
+    """Serve a locally cached video by file ID (basename stem; any supported extension)."""
+    # region agent log
+    _agent_dbg(
+        "H4",
+        "router.serve_video:entry",
+        "query id received",
+        {"file_id_repr": repr(file_id), "len": len(file_id or "")},
+    )
+    # endregion
+    vid = _parse_local_media_file_id(file_id)
+    # region agent log
+    _agent_dbg(
+        "H3",
+        "router.serve_video:parsed",
+        "after _parse_local_media_file_id",
+        {"vid": vid},
+    )
+    # endregion
+    base = video_files_dir()
+    # region agent log
+    _agent_dbg(
+        "H2",
+        "router.serve_video:base_dir",
+        "video_files_dir",
+        {"base_str": str(base), "base_resolved": str(base.resolve(strict=False))},
+    )
+    # endregion
+    for ext in _LOCAL_VIDEO_SERVE_EXTS:
+        path = _safe_file_in_media_dir(base, f"{vid}{ext}")
+        # region agent log
+        _agent_dbg(
+            "H2",
+            "router.serve_video:try_ext",
+            "path check",
+            {"ext": ext, "path_str": str(path), "exists": path.exists()},
+        )
+        # endregion
+        if path.exists():
+            mime = mimetypes.guess_type(path.name)[0] or "video/mp4"
+            # region agent log
+            _agent_dbg(
+                "H5",
+                "router.serve_video:hit",
+                "serving file",
+                {"path_str": str(path), "mime": mime},
+                run_id="pre",
+            )
+            # endregion
+            return FileResponse(path, media_type=mime)
 
-    if not re.fullmatch(r"[0-9a-zA-Z\-_]{16,64}", id):
-        raise ValidationError("Invalid file ID", param="id")
-
-    path = video_files_dir() / f"{id}.mp4"
-    if path.exists():
-        return FileResponse(path, media_type="video/mp4")
-
-    raise ValidationError(f"Video {id!r} not found", param="id")
+    # region agent log
+    _agent_dbg(
+        "H2",
+        "router.serve_video:not_found",
+        "no file for any extension",
+        {"vid": vid},
+    )
+    # endregion
+    raise ValidationError(f"Video {vid!r} not found", param="id")
 
 
 @router.get("/files/image", tags=[_TAG_FILES])
-async def serve_image(id: str = Query(..., description="Image file ID")):
+async def serve_image(
+    file_id: Annotated[str, Query(..., alias="id", description="Image file ID")],
+):
     """Serve a locally cached image by file ID."""
-    import re
-
-    if not re.fullmatch(r"[0-9a-zA-Z\-_]{16,64}", id):
-        raise ValidationError("Invalid file ID", param="id")
-
+    iid = _parse_local_media_file_id(file_id)
     img_dir = image_files_dir()
     for ext in (".jpg", ".png"):
-        path = img_dir / f"{id}{ext}"
+        path = _safe_file_in_media_dir(img_dir, f"{iid}{ext}")
         if path.exists():
             mime = "image/png" if ext == ".png" else "image/jpeg"
             return FileResponse(path, media_type=mime)
 
-    raise ValidationError(f"Image {id!r} not found", param="id")
+    raise ValidationError(f"Image {iid!r} not found", param="id")
 
 
 __all__ = ["router"]

@@ -65,7 +65,9 @@ COPY pyproject.toml config.defaults.toml ./
 COPY app ./app
 COPY scripts ./scripts
 
-RUN mkdir -p /app/data /app/logs \
+# Strip CRLF if scripts were checked out / edited on Windows (breaks shebang + exec).
+RUN sed -i 's/\r$//' /app/scripts/*.sh \
+    && mkdir -p /app/data /app/logs \
     && chmod +x /app/scripts/entrypoint.sh /app/scripts/init_storage.sh
 
 EXPOSE 8000
