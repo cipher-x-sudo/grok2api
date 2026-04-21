@@ -42,6 +42,38 @@ services:
       - "8081:80"
     depends_on:
       - grok2api
+      - session-backend
+    restart: unless-stopped
+
+  postgres:
+    container_name: grok2_postgres
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: grok2user
+      POSTGRES_PASSWORD: grok2password
+      POSTGRES_DB: grok2sessions
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+
+  session-backend:
+    container_name: grok2_session_backend
+    build:
+      context: "./session-backend"
+      dockerfile: Dockerfile
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=grok2user
+      - DB_PASSWORD=grok2password
+      - DB_NAME=grok2sessions
+      - PORT=3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
     restart: unless-stopped
 
   # 如果出口 IP 不干净，可取消以下注释使用 Warp 作为落地代理
@@ -67,3 +99,6 @@ services:
   #     TZ: Asia/Shanghai
   #     LOG_LEVEL: info
   #   restart: unless-stopped
+
+volumes:
+  pgdata:

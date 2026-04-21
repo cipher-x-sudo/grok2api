@@ -29,6 +29,13 @@ export default defineConfig({
     host: "localhost",
     port: 1420,
     strictPort: true,
+    proxy: {
+      '/api/sessions': {
+        target: 'http://localhost:3001/sessions',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/sessions/, '')
+      }
+    }
   },
   resolve: {
     alias: {
